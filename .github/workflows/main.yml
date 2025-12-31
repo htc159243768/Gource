@@ -1,44 +1,111 @@
-name: Render osu Gource with Custom Build
-on: [workflow_dispatch]  # 手动触发
+# 遵循GitHub Actions元数据语法规范：https://docs.github.com/zh/actions/using-workflows/workflow-syntax-for-github-actions
+name: Render osu! with Custom Gource (Stable)
+# 仅手动触发，避免自动执行消耗算力
+on:
+  workflow_dispatch:
+    inputs:
+      resolution:
+        description: 视频分辨率（如1920x1080/1280x720）
+        required: true
+        default: "1920x1080"
+      speed:
+        description: 动画播放速度（数值越大越快）
+        required: true
+        default: "2"
+
 jobs:
-  render:
-    runs-on: ubuntu-latest
+  gource-render:
+    # 使用LTS版本Ubuntu 22.04，避免新版依赖兼容问题
+    runs-on: ubuntu-22.04
+    # 配置权限与系统环境
+    permissions:
+      contents: read
+      actions: read
+      artifacts: write
     steps:
-      - name: Checkout osu (full history)
+      # 步骤1：拉取osu项目完整提交历史（必须fetch-depth: 0）
+      - name: Checkout osu! Repository (Full History)
         uses: actions/checkout@v4
         with:
           repository: ppy/osu
           path: osu
-          fetch-depth: 0
-      - name: Checkout custom Gource
+          fetch-depth: 0  # 拉取所有提交记录，Gource必需
+          lfs: false  # osu无LFS文件，关闭加速
+
+      # 步骤2：拉取自定义Gource源码
+      - name: Checkout Custom Gource
         uses: actions/checkout@v4
         with:
           repository: htc159243768/Gource
           path: Gource
-          fetch-depth: 1
-      - name: Install dependencies
-        run: sudo apt-get install -y cmake libsdl2-dev libsdl2-image-dev libpango1.0-dev ffmpeg
-      - name: Build custom Gource
+          fetch-depth: 1  # 仅拉取最新代码，节省时间
+
+      # 步骤3：替换Ubuntu源为阿里云，解决官方源404问题
+      - name: Replace Ubuntu Mirror (Aliyun)
         run: |
-          cd Gource
-          mkdir build && cd build
-          cmake ..
-          make -j$(nproc)
-      - name: Generate Gource video
+          sudo sed -i.bak 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+          sudo sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+          sudo apt-get clean all
+
+      # 步骤4：安装所有编译+渲染依赖（含Gource缺失的核心库）
+      - name: Install Build & Render Dependencies
         run: |
-          cd osu
+          sudo apt-get update -y
+          sudo apt-get install -y --fix-missing \
+            cmake \
+            g++ \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libpango1.0-dev \
+            libglew-dev \
+            libboost-all-dev \
+            libglm-dev \
+            ffmpeg \
+            pkg-config
+          # 验证依赖安装
+          pkg-config --modversion sdl2 > /dev/null && echo "SDL2 installed"
+
+      # 步骤5：编译自定义Gource（Release模式，优化性能）
+      - name: Build Custom Gource (Release)
+        run: |
+          cd $GITHUB_WORKSPACE/Gource
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc)  # 按CPU核心数并行编译
+          # 验证编译产物
+          [ -f ./gource ] && echo "Gource compiled successfully" || exit 1
+
+      # 步骤6：渲染osu!提交历史动画（动态参数由手动输入控制）
+      - name: Generate Gource Video
+        run: |
+          cd $GITHUB_WORKSPACE/osu
+          # 调用自定义Gource渲染，直接管道给FFmpeg避免生成大文件
           ../Gource/build/gource \
-            --title "osu! Project History (Custom Gource)" \
+            --title "osu! Project Git History (Custom Gource)" \
             --output-framerate 30 \
             --auto-skip-seconds 1 \
             --camera-mode track \
             --file-idle-time 0 \
-            -1920x1080 \
+            --speed ${{ github.event.inputs.speed }} \
+            -${{ github.event.inputs.resolution }} \
             --output-ppm-stream - \
-            | ffmpeg -y -f image2pipe -vcodec ppm -i - -c:v libx264 -pix_fmt yuv420p -crf 18 osu-gource.mp4
-      - name: Upload video artifact
+            | ffmpeg -y \
+                -f image2pipe \
+                -vcodec ppm \
+                -i - \
+                -c:v libx264 \
+                -pix_fmt yuv420p \
+                -crf 18 \
+                -preset fast \
+                osu-gource-${{ github.event.inputs.resolution }}.mp4
+          # 验证视频生成
+          [ -f osu-gource-${{ github.event.inputs.resolution }}.mp4 ] && echo "Video generated" || exit 1
+
+      # 步骤7：上传视频产物（保留14天，支持多分辨率）
+      - name: Upload Rendered Video
         uses: actions/upload-artifact@v4
         with:
-          name: osu-gource-video
-          path: osu/osu-gource.mp4
-          retention-days: 14
+          name: osu-gource-video-${{ github.event.inputs.resolution }}
+          path: $GITHUB_WORKSPACE/osu/osu-gource-${{ github.event.inputs.resolution }}.mp4
+          retention-days: 14  # 自动清理过期产物
+          if-no-files-found: error  # 无文件则标记失败
