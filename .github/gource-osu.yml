@@ -1,0 +1,44 @@
+name: Render osu Gource with Custom Build
+on: [workflow_dispatch]  # 手动触发
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout osu (full history)
+        uses: actions/checkout@v4
+        with:
+          repository: ppy/osu
+          path: osu
+          fetch-depth: 0
+      - name: Checkout custom Gource
+        uses: actions/checkout@v4
+        with:
+          repository: htc159243768/Gource
+          path: Gource
+          fetch-depth: 1
+      - name: Install dependencies
+        run: sudo apt-get install -y cmake libsdl2-dev libsdl2-image-dev libpango1.0-dev ffmpeg
+      - name: Build custom Gource
+        run: |
+          cd Gource
+          mkdir build && cd build
+          cmake ..
+          make -j$(nproc)
+      - name: Generate Gource video
+        run: |
+          cd osu
+          ../Gource/build/gource \
+            --title "osu! Project History (Custom Gource)" \
+            --output-framerate 30 \
+            --auto-skip-seconds 1 \
+            --camera-mode track \
+            --file-idle-time 0 \
+            -1920x1080 \
+            --output-ppm-stream - \
+            | ffmpeg -y -f image2pipe -vcodec ppm -i - -c:v libx264 -pix_fmt yuv420p -crf 18 osu-gource.mp4
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osu-gource-video
+          path: osu/osu-gource.mp4
+          retention-days: 14
